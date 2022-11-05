@@ -843,7 +843,8 @@ dependencies = [
 [[package]]
 name = "quick-xml"
 version = "0.26.0"
-source = "git+https://github.com/tafia/quick-xml?branch=master#a54f6c2211e4fd6541c7191992e451ed47831b74"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f50b1c63b38611e7d4d7f68b82d3ad0cc71a2ad2e7f61fc10f1328d917c93cd"
 dependencies = [
  "memchr",
  "serde",
