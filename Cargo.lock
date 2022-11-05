@@ -656,20 +656,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f05d47d2bcf073a0a8864360195ac45e76acd18cadfe632ef01757a179070b32"
 
 [[package]]
-name = "noisy-smelt"
-version = "0.1.0"
-dependencies = [
- "clap",
- "inquire",
- "quick-xml",
- "reqwest",
- "serde",
- "tempfile",
- "tokio",
- "zip",
-]
-
-[[package]]
 name = "num_cpus"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1587,6 +1573,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "80d0f4e272c85def139476380b12f9ac60926689dd2e01d4923222f40580869d"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "xml-conformance-rs"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "inquire",
+ "quick-xml",
+ "reqwest",
+ "serde",
+ "tempfile",
+ "tokio",
+ "zip",
 ]
 
 [[package]]
