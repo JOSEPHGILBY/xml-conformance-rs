@@ -128,7 +128,7 @@ struct TestCase {
     #[serde(rename = "@OUTPUT")]
     output: Option<String>,
     #[serde(rename = "$text")]
-    test_comment: Vec<String>,
+    test_comment: String,
 }
 #[derive(PartialEq, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -137,7 +137,6 @@ enum TestCaseType {
     Invalid,
     NotWf,
     Error,
-
 }
 
 #[tokio::main]
