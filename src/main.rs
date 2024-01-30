@@ -8,7 +8,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{copy, Cursor, BufReader};
 use std::{thread, time};
 use std::env;
-use std::path::{PathBuf, Path};
+use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use quick_xml::de::from_reader;
@@ -127,8 +127,16 @@ struct TestCase {
     expected_outcome: TestCaseType,
     #[serde(rename = "@OUTPUT")]
     output: Option<String>,
+    #[serde(rename = "$value")]
+    test_comment: Vec<MixedTagTextElement>,
+}
+
+#[derive(Debug, Deserialize)]
+enum MixedTagTextElement {
+    #[serde(rename = "EM")]
+    em(String),
     #[serde(rename = "$text")]
-    test_comment: String,
+    String,
 }
 #[derive(PartialEq, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -139,94 +147,139 @@ enum TestCaseType {
     Error,
 }
 
+impl Display for TestCaseType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self {
+            TestCaseType::Valid => "valid",
+            TestCaseType::Invalid => "invalid",
+            TestCaseType::NotWf => "not well-formed",
+            TestCaseType::Error => "error",
+        })
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //let args = Cli::parse();
-    let selected_releases = MultiSelect::new("Select which test suites to run:", RELEASES.to_vec()).prompt()?;
-    
-    //let tmp_dir = Builder::new().prefix("example").tempdir()?;
-    let curr_dir = std::env::current_dir()?;
-    let curr_dir_path = curr_dir.as_path();
-    for release in selected_releases.iter() {
-        let zip_file_path = curr_dir_path.join(release.filename);
-        if !zip_file_path.try_exists()? {
-            let response = reqwest::get(release.download_zip_url).await?;
-            let mut zip_file_write = File::create(&zip_file_path)?;
-            let mut content = Cursor::new(response.bytes().await?);
-            copy(&mut content, &mut zip_file_write)?;
-        }
-
-        let zip_file_parent = zip_file_path.parent().ok_or(format!("no parent for {:?}", zip_file_path.to_str()))?;
-        let extract_dir_name = zip_file_path.file_stem().ok_or(format!("no file stem for {:?}", zip_file_path.to_str()))?;
-        let extract_dir_path = zip_file_parent.join(extract_dir_name);
-
-        if !extract_dir_path.try_exists()? {
-            let zip_file_read = File::open(&zip_file_path)?;
-            let mut archive = zip::ZipArchive::new(zip_file_read)?;
-            archive.extract(&extract_dir_path)?;
-        }
-        let release_root_path = extract_dir_path.as_path().join("xmlconf");
-        if let Some(conf_sub_path) = release.sun_valid_tests_conf {
-            run_sun_tests_for(conf_sub_path, &release_root_path)?;
-        }
-        if let Some(conf_sub_path) = release.sun_invalid_tests_conf {
-            run_sun_tests_for(conf_sub_path, &release_root_path)?;
-        }
-        if let Some(conf_sub_path) = release.sun_non_wf_tests_conf {
-            run_sun_tests_for(conf_sub_path, &release_root_path)?;
-        }
-        if let Some(conf_sub_path) = release.sun_error_tests_conf {
-            run_sun_tests_for(conf_sub_path, &release_root_path)?;
-        }
-        if let Some(conf_sub_path) = release.ibm_valid_tests_conf {
-            run_ibm_tests_for(conf_sub_path, &release_root_path)?;
-        }
-    }
+    let test_manager = TestManager::new_interactive()?;
+    test_manager.run_tests().await?;
     
     Ok(())
 }
 
-fn run_ibm_tests_for(conf_sub_path: &str, release_root_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let (conf_file_parent_dir, reader) = setup_config_file_buf_reader(release_root_path, conf_sub_path)?;
-    let tier_1: TestCasesTier1 = from_reader(reader)?;
-    for test_cases in tier_1.tier_2.iter() {
-        run_test_case_node(&test_cases.tests, &conf_file_parent_dir)?;
+struct TestManager {
+    selected_releases: Vec<ConformanceTestRelease<'static>>,
+    selected_test_types: Vec<TestCaseType>,
+}
+
+impl TestManager {
+
+    pub fn new_interactive() -> Result<Self, Box<dyn std::error::Error>> {
+        let selected_releases = MultiSelect::new("Select which test suites to run:", RELEASES.to_vec()).prompt()?;
+        let test_case_types = vec![
+            TestCaseType::Valid,
+            TestCaseType::Invalid,
+            TestCaseType::NotWf,
+            TestCaseType::Error,
+        ];
+        let selected_test_types = MultiSelect::new("Select the test types to run: ", test_case_types).prompt()?;
+        Ok(Self{
+            selected_releases,
+            selected_test_types
+        })
     }
-    Ok(())
-}
 
-fn run_sun_tests_for(conf_sub_path: &str, release_root_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let (conf_file_parent_dir, reader) = setup_config_file_buf_reader(release_root_path, conf_sub_path)?;
-    let test_cases: Vec<TestCase> = from_reader(reader)?;
-    run_test_case_node(&test_cases, &conf_file_parent_dir)?;
-    Ok(())
-}
-
-fn run_test_case_node(test_cases: &[TestCase], conf_file_parent_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    for test_case in test_cases.iter() {
-        let file_to_read_path = conf_file_parent_dir.join(test_case.uri.clone());
-        let mut test_case_reader = NsReader::from_file(file_to_read_path.as_path())?;
-        let mut buf = Vec::new();
-        loop {
-            let result = test_case_reader.read_resolved_event_into(&mut buf);
-            match result { 
-                Err(err) => {
-                    if test_case.expected_outcome == TestCaseType::Valid || test_case.expected_outcome == TestCaseType::Invalid {
-                        println!("------------------\nMISMATCHED OUTCOME\nGot error: {:?}\nIn well formed test: {:?}", err, test_case);
-                    }      
-                    break;
-                },
-                Ok((_, Event::Eof)) => {
-                    if test_case.expected_outcome == TestCaseType::NotWf || test_case.expected_outcome == TestCaseType::Error {
-                        println!("------------------\nMISMATCHED OUTCOME\nParsed non-well formed document\nFor test: {:?}", test_case);
-                    }
-                    break
-                },
-                _ => {}
+    pub async fn run_tests(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let curr_dir = std::env::current_dir()?;
+        let curr_dir_path = curr_dir.as_path();
+        let test_releases_path = curr_dir_path.join("test-releases");
+        if !test_releases_path.try_exists()? {
+            std::fs::create_dir(&test_releases_path)?;
+        }
+        for release in self.selected_releases.iter() {
+            let zip_file_path = test_releases_path.join(release.filename);
+            if !zip_file_path.try_exists()? {
+                let response = reqwest::get(release.download_zip_url).await?;
+                let mut zip_file_write = File::create(&zip_file_path)?;
+                let mut content = Cursor::new(response.bytes().await?);
+                copy(&mut content, &mut zip_file_write)?;
+            }
+    
+            let zip_file_parent = zip_file_path.parent().ok_or(format!("no parent for {:?}", zip_file_path.to_str()))?;
+            let extract_dir_name = zip_file_path.file_stem().ok_or(format!("no file stem for {:?}", zip_file_path.to_str()))?;
+            let extract_dir_path = zip_file_parent.join(extract_dir_name);
+    
+            if !extract_dir_path.try_exists()? {
+                let zip_file_read = File::open(&zip_file_path)?;
+                let mut archive = zip::ZipArchive::new(zip_file_read)?;
+                archive.extract(&extract_dir_path)?;
+            }
+            let release_root_path = extract_dir_path.as_path().join("xmlconf");
+            if let Some(conf_sub_path) = release.sun_valid_tests_conf {
+                self.run_sun_tests_for(conf_sub_path, &release_root_path)?;
+            }
+            if let Some(conf_sub_path) = release.sun_invalid_tests_conf {
+                self.run_sun_tests_for(conf_sub_path, &release_root_path)?;
+            }
+            if let Some(conf_sub_path) = release.sun_non_wf_tests_conf {
+                self.run_sun_tests_for(conf_sub_path, &release_root_path)?;
+            }
+            if let Some(conf_sub_path) = release.sun_error_tests_conf {
+                self.run_sun_tests_for(conf_sub_path, &release_root_path)?;
+            }
+            if let Some(conf_sub_path) = release.ibm_valid_tests_conf {
+                self.run_ibm_tests_for(conf_sub_path, &release_root_path)?;
             }
         }
+        
+        Ok(())
     }
-    Ok(())
+
+    fn run_ibm_tests_for(&self, conf_sub_path: &str, release_root_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let (conf_file_parent_dir, reader) = setup_config_file_buf_reader(release_root_path, conf_sub_path)?;
+        let tier_1: TestCasesTier1 = from_reader(reader)?;
+        for test_cases in tier_1.tier_2.iter() {
+            self.run_test_case_node(&test_cases.tests, &conf_file_parent_dir)?;
+        }
+        Ok(())
+    }
+    
+    fn run_sun_tests_for(&self, conf_sub_path: &str, release_root_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let (conf_file_parent_dir, reader) = setup_config_file_buf_reader(release_root_path, conf_sub_path)?;
+        let test_cases: Vec<TestCase> = from_reader(reader)?;
+        self.run_test_case_node(&test_cases, &conf_file_parent_dir)?;
+        Ok(())
+    }
+
+    fn run_test_case_node(&self, test_cases: &[TestCase], conf_file_parent_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        for test_case in test_cases.iter() {
+            if !self.selected_test_types.contains(&test_case.expected_outcome) {
+                continue;
+            }
+            let file_to_read_path = conf_file_parent_dir.join(test_case.uri.clone());
+            let mut test_case_reader = NsReader::from_file(file_to_read_path.as_path())?;
+            let mut buf = Vec::new();
+            loop {
+                let result = test_case_reader.read_resolved_event_into(&mut buf);
+                match result { 
+                    Err(err) => {
+                        if test_case.expected_outcome == TestCaseType::Valid || test_case.expected_outcome == TestCaseType::Invalid {
+                            println!("------------------\nMISMATCHED OUTCOME\nGot error: {:?}\nIn well formed test: {:?}", err, test_case);
+                        }      
+                        break;
+                    },
+                    Ok((_, Event::Eof)) => {
+                        if test_case.expected_outcome == TestCaseType::NotWf || test_case.expected_outcome == TestCaseType::Error {
+                            println!("------------------\nMISMATCHED OUTCOME\nParsed non-well formed document\nFor test: {:?}", test_case);
+                        }
+                        break
+                    },
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn setup_config_file_buf_reader(release_root_path: &Path, conf_sub_path: &str) -> Result<(PathBuf, BufReader<File>), Box<dyn std::error::Error>> {
